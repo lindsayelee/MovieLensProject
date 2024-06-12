@@ -1,0 +1,389 @@
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+library(tidyverse)
+library(caret)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(summarytools) 
+
+
+#Importing MovieLens 10M dataset from Group Lens -------
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+options(timeout = 120)
+
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings |>
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies |>mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+#MovieLens Full Exploration --------------
+#Interested in exploration of the full movie lens dataset prior to split
+
+#convert timestamp to date then to year format
+movielens <- mutate(movielens, date = as_datetime(timestamp))
+movielens$year <- as.numeric(format(movielens$date, "%Y"))
+
+#remove title, timestamp, and date 
+movielens <- movielens |>
+  select(-timestamp, -date)
+
+# Convert user Id and movieId to factors
+movielens$userId <- as.factor(movielens$userId)
+movielens$movieId <- as.factor(movielens$movieId)
+
+#seperate genres with the | symbol
+movielens <- movielens |>
+  separate_rows(genres, sep = "\\|")
+
+#make movie lens a data frame and genres a factor prior to visualization
+movielens = as.data.frame(movielens)
+movielens$genres = as.factor(movielens$genres)
+
+#Research Question 1 ------------
+#Overall estimated Accuracy of ratings 
+overallmean = mean(movielens$rating)
+print(overallmean)
+
+#Summarize mean and sd of rating by genres
+genres_msd = movielens |>group_by(genres) |>
+  summarise(n = n(), mean = mean(rating, na.rm = TRUE), sd = sd(rating, na.rm = TRUE))
+knitr::kable(genres_msd, summary=TRUE, rownames=TRUE)
+
+#drop no genres listed as a category, only 7 
+movielens = subset(movielens, genres != "(no genres listed)")
+movielens  = droplevels(movielens)
+
+#Explore bar plots of Genres x Rating 
+movielens |>
+  ggplot(aes(x = genres, y = rating, fill = genres)) + 
+  geom_bar(stat = "summary", fun = "mean", fill = "darkblue") + 
+  theme(axis.text.x = element_text(angle = 30))
+
+#Explore bar plot of Year x Rating
+movielens |>
+  ggplot(aes(x = year, y = rating)) + 
+  geom_bar(stat = "summary", fun = "mean", fill = "darkblue") + 
+  theme(axis.text.x = element_text(angle = 30))
+
+#Summarize mean, sd, and count by year and genres
+#make year a factor type to run in ggplot plot
+
+movielens$year = as.factor(movielens$year)
+
+year_n = movielens |>
+  group_by(genres, year) |>
+  summarise(count = n(), mean = mean(rating, na.rm = TRUE), sd = sd(rating, na.rm = TRUE)) |>
+  arrange(desc(mean & year))
+
+knitr::kable(year_n, summary=TRUE, rownames=TRUE)
+
+year_meanrating = movielens |>
+  group_by(genres, year) |>
+  summarise(n = n(), meanrating = mean(rating, na.rm = TRUE, 
+                                       sd = sd(rating, na.rm = TRUE)))
+
+knitr::kable(year_meanrating, summary=TRUE, rownames=TRUE)
+
+#Explore genres and year by ratings 
+ggplot(movielens, aes(x = year, y = meanrating, group = genres, color = genres)) +
+  geom_smooth(data = year_meanrating, se = FALSE, method = "lm") + 
+  theme(axis.text.x = element_text(angle = 30)) 
+
+#Ran a regression model for genres and year
+#Exclude from analyses because linear regression is not the right analyses for this type of dataset. 
+#the levels of the predictors were fixed and so linear regression can be computed. It was a problem with 700+ levels
+#m1 = lm(rating ~ genres + year, data = movielens)
+#print(summary(m1))
+
+#There needs to be other predictors considered and explore other methods of analyses to account for year.
+#Year also does not seem to be a significant predictor, I dropped from building a recommendation system. 
+
+#After running an initial multiple regression based on genres, year, and rating, 
+#this also shows that year did not significantly predict ratings. However, all included genres significantly predicted ratings. 
+#For example, Documentary genres had the largest significant relationship to ratings, b = .37, t(25967154) = 112.91, p <.001. 
+#All included genres explained a significant proportion of variance in ratings, R-Squared = .02, F(32, 25967154) = 1.303e+04, p <.001. 
+
+
+#Research Question 2 & 3 --------------
+library(caret)
+# Final hold-out test set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+#Make sure userId and movieId in final hold-out test set are also in edx set
+#use this at the end to test the model
+final_holdout_test <- temp |>
+  semi_join(edx, by = "movieId") |>
+  semi_join(edx, by = "userId")
+
+
+#Add rows removed from final hold-out test set back into edx set
+removed <- anti_join(temp, final_holdout_test)
+edx <- rbind(edx, removed)
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+#library(summarytools)
+#print(dfSummary(edx))
+
+#Summarize count, mean, sd
+
+
+#What is the estimated guess of Accuracy of each set?
+mean(edx$rating, na.rm = TRUE)
+mean(final_holdout_test$rating, na.rm = TRUE)
+
+#Visually, the training and final hold out sets look similar
+#plots are based on count of ratings, did a square root transformation on ratings on both the edx and final holdout test
+#training set
+edx |>group_by(genres, rating) |>
+  ggplot(aes(x = rating, fill = genres)) + 
+  scale_y_continuous(trans='sqrt') +
+  geom_bar() + theme_bw()
+
+ggplot(edx, aes(x = genres, y = rating)) + 
+  geom_bar(stat = "summary", fun = "mean") + 
+  theme()
+
+#test set
+final_holdout_test |>group_by(genres, rating) |>
+  ggplot(aes(x = rating, fill = genres)) +
+  scale_y_continuous(trans='sqrt') +
+  geom_bar() + theme_bw()
+
+ggplot(final_holdout_test, aes(x = genres, y = rating)) + 
+  geom_bar(stat = "summary", fun = "mean") + 
+  theme()
+
+#Building the Recommendation System-----------
+#Define RMSE function -----------
+#Use the RMSE function defined in the course and the code provided with some modifications to account for genres and the interaction to user ID and movie ID. 
+#https://learning.edx.org/course/course-v1:HarvardX+PH125.8x+1T2023/block-v1:HarvardX+PH125.8x+1T2023+type@sequential+block@7e7727ce543b4ed6ae6338626862eada/block-v1:HarvardX+PH125.8x+1T2023+type@vertical+block@55f470e389ca4d119b1e311840be15e7
+#https://learning.edx.org/course/course-v1:HarvardX+PH125.8x+1T2023/block-v1:HarvardX+PH125.8x+1T2023+type@sequential+block@7e7727ce543b4ed6ae6338626862eada/block-v1:HarvardX+PH125.8x+1T2023+type@vertical+block@df3d8a86b43f4247a4dd42bcabb1a663
+#https://rafalab.dfci.harvard.edu/dsbook/large-datasets.html#modeling-movie-effects 
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))}
+
+mu_hat = mean(edx$rating, na.rm = TRUE)
+mu_hat
+hist(edx$rating)
+#same plot but in ggplot
+edx |>
+  ggplot(aes(x = rating))  +
+  geom_bar() + theme_bw()
+
+#use this for testing later
+naive_rmse <- RMSE(final_holdout_test$rating, mu_hat)
+naive_rmse
+
+#this computes the Average Model
+predictions <- rep(2.5, nrow(final_holdout_test))
+RMSE(final_holdout_test$rating, predictions)
+rmse_results <- tibble(method = "Average", RMSE = naive_rmse)
+
+
+#Model ONLY Movie effects -----------
+#This modeled all movies
+mu <- mean(edx$rating) 
+movie_avgs <- edx |>
+  group_by(movieId) |>
+  summarize(b_i = mean(rating - mu))
+movie_avgs %>%
+  qplot(b_i, geom ="histogram", bins = 40, data = ., color = I("black"))
+
+predicted_ratings <- mu + final_holdout_test |>
+  left_join(movie_avgs, by='movieId') |>
+  pull(b_i)
+
+model_1_rmse <- RMSE(predicted_ratings, final_holdout_test$rating)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Movie Effect Model",
+                                     RMSE = model_1_rmse ))
+rmse_results |>knitr::kable()
+
+
+#Modeling ONLY Users Effects--------
+#This modeled all users 
+user_avgs <- edx |>
+  group_by(userId) |>
+  summarize(b_k = mean(rating - mu)) 
+user_avgs %>%
+  qplot(b_k, geom ="histogram", bins = 25, data = ., color = I("black")) 
+
+predicted_ratings <- mu + final_holdout_test |>
+  left_join(user_avgs, by='userId') |>
+  pull(b_k)
+
+model_2_rmse <- RMSE(predicted_ratings, final_holdout_test$rating)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="User Effect Model",
+                                     RMSE = model_2_rmse ))
+rmse_results |>knitr::kable()
+
+
+#Modeling ONLY Genre Effects-------
+#group by all genres and count in the training set 
+edx |>group_by(genres, rating) |>
+  summarize(genres_count = n())
+
+genre_avgs <- edx |>
+  group_by(genres) |>
+  summarize(b_z = mean(rating - mu))
+
+genre_avgs %>%
+  qplot(b_z, geom ="histogram", bins = 10, data = ., color = I("black")) 
+
+predicted_ratings_genre <- mu + final_holdout_test |>
+  left_join(genre_avgs, by='genres') |>
+  pull(b_z)
+
+model_3_rmse <- RMSE(predicted_ratings_genre, final_holdout_test$rating)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Genre Effect Model",
+                                     RMSE = model_3_rmse ))
+rmse_results |>knitr::kable()
+
+#Hierarchically Add Movie & User Effect -----------
+# Modeling Movie & User Effects ----------------
+#this modeled all movies rated by all users
+edx |>
+  group_by(userId) |>
+  summarize(b_u = mean(rating)) |>
+  ggplot(aes(b_u)) + 
+  geom_histogram(bins = 30, color = "black")+ theme_bw()
+
+user_avgs <- edx |>
+  left_join(movie_avgs, by='movieId') |>
+  group_by(userId) |>
+  summarize(b_u = mean(rating - mu - b_i))
+
+predicted_ratings <- final_holdout_test |>
+  left_join(movie_avgs, by='movieId') |>
+  left_join(user_avgs, by='userId') |>
+  mutate(pred = mu + b_i + b_u) |>
+  pull(pred)
+
+model_4_rmse <- RMSE(predicted_ratings, final_holdout_test$rating)
+
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Movie + User Effects Model",  
+                                     RMSE = model_4_rmse ))
+rmse_results |>knitr::kable()
+
+#Model Genre x Movie x User Effects -------------------
+#the modeled the ratings based on all genres, all movies, and all users
+#This is the final model that I used to report! RMSE is .856
+edx |>
+  group_by(genres) |>
+  summarize(b_z = mean(rating)) |>
+  ggplot(aes(b_z)) + 
+  geom_histogram(bins = 30, color = "black")
+
+genre_avgs <- edx |>
+  left_join(movie_avgs, by='movieId') |>
+  left_join(user_avgs, by ='userId') |>
+  group_by(genres) |>
+  summarize(b_final = mean(rating - mu - b_i - b_u))
+
+predicted_ratings <- final_holdout_test |>
+  left_join(movie_avgs, by='movieId') |>
+  left_join(user_avgs, by='userId') |>
+  left_join(genre_avgs, by = 'genres') |>
+  mutate(pred = mu + b_i + b_u + b_final) |>
+  pull(pred)
+
+model_5_rmse <- RMSE(predicted_ratings, final_holdout_test$rating)
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Movie + User + Genre Effects Model",  
+                                 RMSE = model_5_rmse ))
+rmse_results |>knitr::kable()
+
+#Regularization --------------
+#Interested in Genre Effect model 
+#Regularize the Genre Effect model
+#I did not include this in the final output because it yielded the exact same RMSE as the User X Movie X Genre Effect Model.
+#genre_titles <- edx |>
+#  dplyr::select(genres, title) |>
+#  distinct()
+#
+#lambda <- 3
+#mu <- mean(edx$rating)
+#genre_reg_avgs <- edx |>
+#  group_by(genres) |>
+#  summarize(b_reg = sum(rating - mu)/(n()+lambda), n_z = n()) 
+#
+#reg_edx = tibble(original = genre_avgs$b_final, 
+#          regularlized = genre_reg_avgs$b_reg, 
+#           n = genre_reg_avgs$n_z) 
+#
+#reg_edx %>% ggplot(aes(x = original, y = regularlized)) + 
+#             geom_point() +
+#
+#edx |>
+#  count(genres) |>
+#  left_join(genre_reg_avgs, by="genres") |>
+#  left_join(genre_titles, by="genres") |>
+#  arrange(desc(b_reg)) |>
+#  dplyr::select(title, b_reg, n) |>
+#  slice(1:10) |>
+#  pull(title)
+#
+#edx |>
+#  left_join(movie_avgs, by='movieId') |>
+#  left_join(user_avgs, by ='userId') |>
+#  group_by(genres) |>
+#  summarize(b_final = mean(rating - mu - b_i - b_u))
+#
+#
+#
+#edx |>
+#  dplyr::count(genres) |>
+#  left_join(genre_reg_avgs, by="genres") |>
+#  left_join(genre_titles, by="genres") |>
+#  arrange(b_z) |>
+#  dplyr::select(title, b_reg, n) |>
+#  slice(1:10) |>
+#  pull(title)
+##
+#predicted_ratings <- final_holdout_test |>
+#  left_join(genre_reg_avgs, by='genres') |>
+#  left_join(movie_avgs, by='movieId') |>
+#  left_join(user_avgs, by='userId') |>
+#  mutate(pred = mu + b_i + b_u + b_final + b_reg) |>
+#  pull(pred)
+#
+#model_6_rmse <- RMSE(predicted_ratings, final_holdout_test$rating)
+#rmse_results <- bind_rows(rmse_results,
+#                          tibble(method="Regularized Genre X User X Movie Effect Model",  
+#                                 RMSE = model_6_rmse))
+#rmse_results |>knitr::kable()
+ 
